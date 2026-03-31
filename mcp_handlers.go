@@ -927,13 +927,23 @@ func (s *AppServer) handleCreatorPhoneLogin(ctx context.Context, phone string) *
 func (s *AppServer) handleCreatorVerifyOTP(ctx context.Context, otp string) *MCPToolResult {
 	logrus.Infof("MCP: creator 验证码登录")
 
-	if err := s.xiaohongshuService.CreatorVerifyOTP(otp); err != nil {
+	result, err := s.xiaohongshuService.CreatorVerifyOTP(otp)
+	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{Type: "text", Text: "验证码登录失败: " + err.Error()}},
 			IsError: true,
 		}
 	}
 
+	// 若经历了安全验证扫码流程，附上截图告知用户
+	if result.SecurityQRShot != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{
+				{Type: "text", Text: "creator 登录成功（已完成安全验证扫码）。cookies 已保存，现在可以使用 publish_content 发布内容。"},
+				{Type: "image", MimeType: "image/png", Data: encodeBase64(result.SecurityQRShot)},
+			},
+		}
+	}
 	return &MCPToolResult{
 		Content: []MCPContent{{Type: "text", Text: "creator 登录成功，cookies 已保存。现在可以使用 publish_content 发布内容。"}},
 	}

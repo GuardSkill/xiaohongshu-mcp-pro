@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/proto"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
@@ -83,58 +84,84 @@ func (a *CreatorLoginAction) SendOTP(phone string) ([]byte, error) {
 	return pp.Screenshot(false, nil)
 }
 
-// VerifyOTP 填写验证码并提交登录
-func (a *CreatorLoginAction) VerifyOTP(otp string) error {
-	// 用 JS native setter 填验证码，确保触发 Vue 响应式
-	set, err := a.page.Eval(fmt.Sprintf(`() => {
-		const inp = document.querySelector("input[placeholder*='验证码']");
-		if (!inp) return false;
-		const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-		setter.call(inp, %q);
-		inp.dispatchEvent(new Event('input',  { bubbles: true }));
-		inp.dispatchEvent(new Event('change', { bubbles: true }));
-		inp.dispatchEvent(new Event('blur',   { bubbles: true }));
-		return true;
-	}`, otp))
-	if err != nil || !set.Value.Bool() {
-		return errors.New("未找到验证码输入框")
-	}
-	time.Sleep(500 * time.Millisecond)
+// VerifyOTP 填写验证码并提交登录。
+// 返回值：(安全验证二维码截图, error)
+// 若小红书弹出"安全验证扫码"弹窗，会将截图返回给调用方展示给用户，
+// 同时在后台等待最多 120 秒直到 web_session 出现（用户扫码后写入）。
+func (a *CreatorLoginAction) VerifyOTP(otp string) ([]byte, error) {
+	pp := a.page.Timeout(10 * time.Second)
 
-	// 截图：点击前的页面状态（用于调试）
+	// 找到验证码输入框并用 rod 模拟真实键盘输入，确保触发 Vue 响应式
+	otpInput, err := pp.Element("input[placeholder*='验证码']")
+	if err != nil {
+		return nil, errors.New("未找到验证码输入框")
+	}
+	if err := otpInput.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return nil, errors.Wrap(err, "点击验证码输入框失败")
+	}
+	// 清空已有内容，再输入验证码，确保 Vue 响应式绑定生效
+	if err := otpInput.SelectAllText(); err != nil {
+		logrus.Warnf("SelectAllText failed (non-fatal): %v", err)
+	}
+	if err := otpInput.Input(otp); err != nil {
+		return nil, errors.Wrap(err, "输入验证码失败")
+	}
+	time.Sleep(1 * time.Second)
+
 	if shot, e := a.page.Screenshot(false, nil); e == nil {
 		saveDebugShot("creator-before-login-click", shot)
 	}
 
-	// 检查登录按钮是否可点击；若 disabled 则先用 JS 强制移除限制
-	pp := a.page.Timeout(10 * time.Second)
+	// 等待登录按钮变为可点击（Vue 验证通过），最多 5 秒
 	loginBtn, err := pp.Element(".beer-login-btn")
 	if err != nil {
-		return errors.New("未找到登录按钮")
+		return nil, errors.New("未找到登录按钮")
 	}
-	// 用 JS 强制触发点击，绕过 disabled 限制
-	_, _ = a.page.Eval(`() => {
-		const btn = document.querySelector(".beer-login-btn");
-		if (btn) { btn.removeAttribute("disabled"); btn.click(); }
-	}`)
-	time.Sleep(5 * time.Second)
+	for i := 0; i < 10; i++ {
+		d, _ := loginBtn.Attribute("disabled")
+		if d == nil {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if err := loginBtn.Click(proto.InputMouseButtonLeft, 1); err != nil {
+		return nil, errors.Wrap(err, "点击登录按钮失败")
+	}
+	time.Sleep(3 * time.Second)
 
-	// 截图：点击后的页面状态
 	if shot, e := a.page.Screenshot(false, nil); e == nil {
 		saveDebugShot("creator-after-login-click", shot)
 	}
 
-	_ = loginBtn // 已通过 JS 点击，rod Click 仅作备用
-	// 检查是否登录成功（不再在 /login 页面）
-	info, err := pp.Info()
+	// 以 creator 页面离开 /login 为登录成功的信号（比 web_session 更准确）
+	if a.creatorLoginDone() {
+		return nil, nil
+	}
+
+	// 仍在 /login 页面：说明弹出了安全验证二维码，截图后等待用户扫码（最多 120 秒）
+	shot, _ := a.page.Screenshot(false, nil)
+	logrus.Infof("检测到安全验证弹窗，等待用户扫码（最多 120 秒）")
+	for i := 0; i < 60; i++ {
+		time.Sleep(2 * time.Second)
+		if a.creatorLoginDone() {
+			logrus.Infof("扫码验证完成，creator 登录成功")
+			return shot, nil
+		}
+	}
+	return nil, errors.New("安全验证超时（120 秒），请重新登录")
+}
+
+// creatorLoginDone 检查 creator 页面是否已离开 /login（登录完成的信号）
+func (a *CreatorLoginAction) creatorLoginDone() bool {
+	info, err := a.page.Info()
 	if err != nil {
-		return errors.Wrap(err, "获取页面信息失败")
+		return false
 	}
-	if strings.Contains(info.URL, "/login") {
-		return errors.New("验证码错误或登录失败，仍在登录页")
+	done := !strings.Contains(info.URL, "/login")
+	if done {
+		logrus.Infof("creator 登录完成，当前 URL: %s", info.URL)
 	}
-	logrus.Infof("creator 登录成功，当前 URL: %s", info.URL)
-	return nil
+	return done
 }
 
 // CheckCreatorLoginStatus 检查 creator 是否已登录

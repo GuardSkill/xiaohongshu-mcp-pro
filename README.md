@@ -62,6 +62,8 @@ creator_verify_otp(otp="123456")
 check_login_status()
 ```
 
+> **部分账号存在二步验证：** 填写验证码后，小红书可能弹出安全验证二维码（`creator_verify_otp` 会返回截图）。用小红书 App 扫码后，服务自动检测跳转并完成 session 保存，整个过程最多等待 120 秒，无需额外操作。
+
 ### 3. 发布内容
 
 ```

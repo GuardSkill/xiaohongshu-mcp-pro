@@ -653,10 +653,16 @@ func (s *XiaohongshuService) CreatorPhoneLogin(phone string) (*CreatorPhoneLogin
 	}, nil
 }
 
+// CreatorVerifyOTPResult creator 验证码登录结果
+type CreatorVerifyOTPResult struct {
+	// SecurityQRShot 非 nil 时表示小红书弹出了安全验证弹窗，已等待用户扫码并成功
+	SecurityQRShot []byte
+}
+
 // CreatorVerifyOTP 填写验证码完成 creator 登录
-func (s *XiaohongshuService) CreatorVerifyOTP(otp string) error {
+func (s *XiaohongshuService) CreatorVerifyOTP(otp string) (*CreatorVerifyOTPResult, error) {
 	if s.creatorLoginPage == nil || s.creatorLoginBrowser == nil {
-		return fmt.Errorf("请先调用 creator_phone_login 发送验证码")
+		return nil, fmt.Errorf("请先调用 creator_phone_login 发送验证码")
 	}
 
 	b := s.creatorLoginBrowser
@@ -667,8 +673,9 @@ func (s *XiaohongshuService) CreatorVerifyOTP(otp string) error {
 	defer page.Close()
 
 	action := xiaohongshu.NewCreatorLogin(page)
-	if err := action.VerifyOTP(otp); err != nil {
-		return err
+	qrShot, err := action.VerifyOTP(otp)
+	if err != nil {
+		return nil, err
 	}
 
 	// 登录成功后跳转到 www.xiaohongshu.com，触发 SSO，让 www session 也写入 profile。
@@ -692,7 +699,7 @@ func (s *XiaohongshuService) CreatorVerifyOTP(otp string) error {
 	} else {
 		logrus.Info("creator + www session 已保存到 profile 及 cookies.json")
 	}
-	return nil
+	return &CreatorVerifyOTPResult{SecurityQRShot: qrShot}, nil
 }
 
 // encodeBase64 将字节切片编码为 base64 字符串
