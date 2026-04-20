@@ -197,9 +197,8 @@ func clickEmptyPosition(page *rod.Page) {
 
 func mustClickPublishTab(page *rod.Page, tabname string) error {
 	// 等待发布区域出现，失败时截图诊断（不 panic）
-	uploadContent, err := page.Timeout(20 * time.Second).Element(`div.upload-content`)
+	_, err := page.Timeout(20 * time.Second).Element(`div.upload-content`)
 	if err != nil {
-		// 截图保存，帮助诊断页面实际状态
 		if img, serr := page.Screenshot(false, nil); serr == nil {
 			path := fmt.Sprintf("/tmp/xhs-publish-debug-%d.png", time.Now().Unix())
 			_ = os.WriteFile(path, img, 0644)
@@ -208,40 +207,46 @@ func mustClickPublishTab(page *rod.Page, tabname string) error {
 		info, _ := page.Info()
 		return errors.Errorf("发布页加载失败（当前 URL: %s），可能未登录 creator 子域或页面结构变化", info.URL)
 	}
-	if err := uploadContent.WaitVisible(); err != nil {
-		logrus.Warnf("div.upload-content 不可见: %v，继续尝试", err)
-	}
+
+	// 用 JS 直接查找有实际尺寸的匹配 tab 并点击，规避 rod 可见性/遮挡误判
+	script := fmt.Sprintf(`() => {
+		const tabs = Array.from(document.querySelectorAll('div.creator-tab'));
+		const target = tabs.find(el => {
+			if (el.innerText.trim() !== %q) return false;
+			const r = el.getBoundingClientRect();
+			return r.width > 0 && r.height > 0;
+		});
+		if (!target) return 'not_found';
+		target.click();
+		return 'clicked';
+	}`, tabname)
 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		tab, blocked, err := getTabElement(page, tabname)
+		result, err := page.Eval(script)
 		if err != nil {
-			logrus.Warnf("获取发布 TAB 元素失败: %v", err)
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
-
-		if tab == nil {
-			time.Sleep(200 * time.Millisecond)
-			continue
+		if result.Value.Str() == "clicked" {
+			return nil
 		}
-
-		if blocked {
-			logrus.Info("发布 TAB 被遮挡，尝试移除遮挡")
-			removePopCover(page)
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-
-		if err := tab.Click(proto.InputMouseButtonLeft, 1); err != nil {
-			logrus.Warnf("点击发布 TAB 失败: %v", err)
-			time.Sleep(200 * time.Millisecond)
-			continue
-		}
-
-		return nil
+		time.Sleep(200 * time.Millisecond)
 	}
 
+	// 超时，截图 + 打印现有 tab 文本供诊断
+	if img, serr := page.Screenshot(false, nil); serr == nil {
+		path := fmt.Sprintf("/tmp/xhs-tab-debug-%d.png", time.Now().Unix())
+		_ = os.WriteFile(path, img, 0644)
+		logrus.Warnf("未找到发布 TAB，截图已保存: %s", path)
+	}
+	if elems, err2 := page.Elements("div.creator-tab"); err2 == nil {
+		for i, el := range elems {
+			if t, err3 := el.Text(); err3 == nil {
+				logrus.Warnf("当前 creator-tab[%d] 文本: %q", i, t)
+			}
+		}
+	}
 	return errors.Errorf("没有找到发布 TAB - %s", tabname)
 }
 
